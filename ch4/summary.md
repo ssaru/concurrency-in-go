@@ -583,3 +583,266 @@ for results := range checckStatus(done, urls...){
     fmt.Printf("ressponse: %v\n", result.Responssse.Status)
 }
 ```
+
+# 2020-07-29, Concurrency in Go, 147~p159
+
+## 파이프라인
+
+-   파이프라인은 시스템에서 추상화를 구성하는데 사용할 수 있는 또 다른 도구
+-   특히, 스트림이나 데이터에 대한 일괄 처리(batch) 작업들을 처리해야 할 때 사용하는 매우 강력한 도구
+-   파이프라인은 데이터를 가져와서, 그 데이터를 대상으로 작업을 수행하고, 결과 데이터를 다시 전달하는 일련의 작업에 불과. 여기서 각각의 작업을 파이프라인상의 단계(stage)라고 부름
+-   파이프라인을 사용하면, 각 단계의 관심사를 분리할 수 있어 많은 이점을 얻을 수 있음
+    -   상호 독립적으로 각 단계를 수정할 수 있음
+    -   단계들의 결합 방식을 짜맞출 수 있음
+    -   일부분을 팬 아웃하거나 속도를 제한할 수 있음
+
+```golang
+package main
+
+import "fmt"
+
+func main() {
+	multiply := func(values []int, multiplier int) []int {
+		multipliedValues := make([]int, len(values))
+
+		for i, v := range values {
+			multipliedValues[i] = v * multiplier
+		}
+
+		return multipliedValues
+	}
+
+	add := func(values []int, additive int) []int {
+		addedValues := make([]int, len(values))
+
+		for i, v := range values {
+			addedValues[i] = v + additive
+		}
+
+		return addedValues
+	}
+
+	ints := []int{1, 2, 3, 4}
+	for _, v := range add(multiply(ints, 2), 1) {
+		fmt.Println(v)
+	}
+}
+```
+
+-   위 예시 코드에서 `multiply`, `add`함수는 일상에서 접할만한 함수이지만, 파이프라인 단계의 속성을 갖도록 구성했기 때문에, 이를 결합해 파이프라인을 구성할 수 있음
+-   파이프라인 단계의 특성이란 무엇인가?
+
+    1. 각 단계는 동일한 타입을 인자로 받고, 리턴한다.
+    2. 각 단계는 전달될 수 있도록 언어에 의해 구체화돼야한다.
+        > 구체화란 함수 개념을 노출시켜주는 것을 의미하는데, Go는 함수 시그니쳐 타입을 갖는 변수를 정의할 수 있다.
+        > `var or func(channels ... <-chan interface{}) <- chan interface{}`
+        > 시그니쳐란 "함수와 인자들의 이름을 제외한 나머지"이다
+        > 즉, 리턴값의 데이터타입, 인자의 개수, 각 인자의 데이터 타입과 순서를 의미한다.
+
+-   파이프라인의 단계는 함수형 프로그래밍의 "모나드"의 부분 집합으로 간주할 수 있다
+
+-   코드를 일부 변경해야할 경우, 파이프라인을 사용하게되면 "재사용"을 통해서 이를 해결할 수 있다.
+-   위의 파이프라인 예제에서 2를 곱하는 새로운 스테이지를 추가한다고 했을 때, 아래와 같이 변경할 수 있다.
+
+```golang
+ints := []int{1,2,3,4}
+for _, v := range multiply(add(multiply(ints, 2), 1), 2){
+    fmt.Println(v)
+}
+```
+
+-   위 예제를 절차적으로 표현하면 아래와 같다.
+-   아래 예제와 같이 절차적으로 표현된 코드는 스트림을 처리할 때, 파이프라인과 같은 이점을 제공하지 못한다.
+
+```golang
+ints := []int{1,2,3,4}
+for _, v := range ints{
+    fmt.Println(2*(v*2+1))
+}
+```
+
+-   지금까지 언급한 내용과 같은 내용이지만, 파이프라인의 단계들은 일괄처리를 수행한다.
+-   일괄처리란 한 번에 하나씩 이산값을 처리하는 대신에 모든 데이터 덩어리를 한 번에 처리한다는 의미이다.
+
+-   스트림 처리를 수행하는 타입의 파이프라인인 경우 각 단계가 한 번에 하나의 요소를 수신하고 방출하는 단계가 하나 더 있다
+-   파이프라인 코드 예제를 스트림 지향으로 변환하면 아래와 같다(거의 유사하다. 단지 한 번에 하나의 요소만 수신하고 방출하게끔 `multiply`, `add`, `for-loop`이 변경되었다)
+
+```golang
+package main
+
+import "fmt"
+
+func main() {
+	multiply := func(value, multiplier int) int {
+		return value * multiplier
+	}
+
+	add := func(value, additive int) int {
+		return value + additive
+	}
+
+	ints := []int{1, 2, 3, 4}
+
+	for _, v := range ints {
+		fmt.Println(multiply(add(multiply(v, 2), 1), 2))
+	}
+}
+```
+
+-   위의 예제는 파이프라인을 for-loop에 배치하고 range가 파이프라인에 데이터를 공급하는 무거운(?) 작업을 수행하도록 작성되었다.
+-   이러한 무거운(?) 작업은 파이프라인에 몇가지 단점을 갖는다.
+
+    1. 데이터를 공급하는 방식의 재사용을 제한한다(?)
+    2. 확장성을 제한한다(?)
+    3. loop가 반복될 때 마다 파이프라인을 인스턴스화한다.
+
+-   이제 Go에서 파이프라인을 구성하기 위한 **최상의 방법**이 무엇이고, Go의 채널 기본 요소를 시작한다.
+
+**NOTE**
+
+-   Q1. `위의 예제는 파이프라인을 for-loop에 배치하고 range가 파이프라인에 데이터를 공급하는 무거운(?) 작업을 수행하도록 작성되었다`
+    -   무거운 작업이라는게 어떤 의미인지 모르습니다.
+-   Q2. `데이터를 공급하는 방식의 재사용을 제한한다(?)`
+    -   A. 재사용이라고하면, 뒤에 나오는 generator를 활용하여 재사용성을 증가시킨다고 이해했습니다.
+-   Q3. `확장성을 제한한다(?)`
+    -   A. 책의 후미에서 보강해주리라 믿습니다...
+
+### 파이프라인 구축의 모범 사례
+
+-   채널은 Go의 모든 기본 요구 사항(?)을 충족한다
+
+    1. 채널의 값을 받고 방출할 수 있다.
+    2. 동시에 실행해도 안전하다.
+    3. 언어에 의해 구체화된다.
+    4. 여러가지를 아우른다(?)
+
+-   앞의 예제를 채널을 활용하는 방향으로 변경해보자
+
+```golang
+package main
+
+import "fmt"
+
+func main() {
+	generator := func(done <-chan interface{}, integers ...int) <-chan int {
+		intStream := make(chan int, len(integers))
+
+		go func() {
+			defer close(intStream)
+
+			for _, i := range integers {
+				select {
+				case <-done:
+					return
+				case intStream <- i:
+				}
+			}
+		}()
+		return intStream
+	}
+
+	multiply := func(
+		done <-chan interface{},
+		intStream <-chan int,
+		multiplier int,
+	) <-chan int {
+
+		multipliedStream := make(chan int)
+		go func() {
+			defer close(multipliedStream)
+			for i := range intStream {
+				select {
+				case <-done:
+					return
+				case multipliedStream <- i * multiplier:
+				}
+			}
+		}()
+		return multipliedStream
+	}
+	add := func(done <-chan interface{},
+		intStream <-chan int,
+		additive int,
+	) <-chan int {
+		addedStream := make(chan int)
+		go func() {
+			defer close(addedStream)
+			for i := range intStream {
+				select {
+				case <-done:
+					return
+				case addedStream <- i + additive:
+				}
+			}
+		}()
+		return addedStream
+	}
+
+	done := make(chan interface{})
+	defer close(done)
+
+	intStream := generator(done, 1, 2, 3, 4)
+	pipeline := multiply(done, add(done, multiply(done, intStream, 2), 1), 2)
+
+	for v := range pipeline {
+		fmt.Println(v)
+	}
+
+}
+```
+
+-   변경된 코드는 모두 채널을 사용한다는 점에서 이전 코드와 다르며 결정적인 차이는 아래와 같다
+
+    1. 파이프라인의 끝에서 `range`구문을 사용해 값을 추출한다
+    2. 파이프라인의 각 단계가 동시에 실행된다.
+    3. 입력 및 출력이 동시에 실행되는 컨텍스트에서 안전하다
+    4. (3)으로 인해 각 단계에서 안전하게 동시에 실행할 수 있다
+
+-   코드의 실행순서를 테이블로 나타내면 아래와 같다
+
+| 반복변수 | Generator | Multiply |   Add   | Multiply | 값  |
+| :------: | :-------: | :------: | :-----: | :------: | :-: |
+|    0     |     1     |          |         |          |     |
+|    0     |           |    1     |         |          |     |
+|    0     |     2     |          |    2    |          |     |
+|    0     |           |    2     |         |    3     |     |
+|    0     |     3     |          |    4    |          |  6  |
+|    1     |           |    3     |         |    5     |     |
+|    1     |     4     |          |    6    |          | 10  |
+|    2     |  (close)  |    4     |         |    7     |     |
+|    2     |           | (close)  |    8    |          | 14  |
+|    3     |           |          | (close) |    9     |     |
+|    3     |           |          |         | (close)  | 18  |
+
+-   파이프라인이 실행되는 도중 `done`채널을 닫으면 닫힌 `done`채널이 파이프라인에 전파된다
+-   닫힌 `done`채널의 전파로인해 파이프라인은 강제로 종료된다.
+
+-   앞서, 파이프라인의 시작 부분에서 이산 값을 채널로 변경해야한다고 했다
+-   이로인해, 위 예제의 프로세스에서는 반드시 선점 가능해야하는 두가지 지점이 있다(?)
+
+    1. 즉각적으로 이루어지지 않는 이산 값의 생성(?)
+    2. 해당 채널로의 이산 값 전송
+
+-   첫 번째는 코드 작성자에게 달렸다(?)
+-   두 번째는 `select`와 `done`채널을 통해 처리된다
+
+    -   이로인해 `intStream`에 쓰기를 시도하는 것이 차단된 경우에도 generator가 선점 가능하도록 한다.
+
+-   입력 채널에서 값을 가져오기 위해 어떤 단계가 대기 상태가 되면ㄴ, 해당 채널이 닫힐 때, 그 단계가 대기 해제된다.
+-   값을 전송하다가 단계가 대기 상태가 되는 경우, `select`문을 사용한다면 선점 가능하다
+-   전체 파이프라인은 `done`채널을 닫음으로써 항상 선점 가능하다.
+
+**NOTE**
+
+-   Q1. `채널은 Go의 모든 기본 요구 사항(?)을 충족한다`
+    -   A. 여기서 의미하는 **모든 기본 요구 사항**은 **파이프라인 단계의 특성**에 대한 요구사항을 충족한다고 이해했습니다.
+-   Q2. `여러가지를 아우른다(?)`
+    -   여러가지가 어떤 의미인지 모르겠네요...
+-   Q3. `파이프라인의 시작 부분에서 이산 값을 채널로 변경해야하므로, 해당 프로세스에서는 반드시 선점 가능해야하는 두가지 지점이 있다(?)`
+    -   이산값을 채널로 변경해야하는 것과 선점해야하는 지점은 어떤 관계가 있는지 모르겠습니다... 애초에 왜 선점해야하는지 모르겠습니다.
+    -   (!!) 파이프라인의 시작부분이기 때문에, 이를 선점하고 들어가야 파이프라인을 실행시킬 수 있지 않을까 생각해봤습니다.
+        선점한다는게 `제어가능/개입가능(Controllable)`을 의미하는게 아닌가 싶습니다. 파이프라인을 제어하기 위해서 선점 가능해야한다고 해석됩니다.
+-   Q4. `즉각적으로 이루어지지 않는 이산 값의 생성(?)`
+    -   (Q3)이 해소되면 자연스럽게 해결되리라 기대해봅니다...
+-   Q5. `첫 번째는 코드 작성자에게 달렸다(?)`
+    -   (Q3)이 해소되면 자연스럽게 해결되리라 기대해봅니다...
