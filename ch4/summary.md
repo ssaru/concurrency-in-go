@@ -846,3 +846,443 @@ func main() {
     -   (Q3)이 해소되면 자연스럽게 해결되리라 기대해봅니다...
 -   Q5. `첫 번째는 코드 작성자에게 달렸다(?)`
     -   (Q3)이 해소되면 자연스럽게 해결되리라 기대해봅니다...
+
+# 2020-07-29, Concurrency in Go, 159~p172
+
+### 유용한 생성기들
+
+-   파이프라인의 `generator`는 이산 값의 집합을 채널의 값 스트림으로 변환하는 함수
+-   본 섹션에서는 `generator`의 다양한 형태를 알아본다.
+
+    1. repeat
+    2. take
+    3. repeatFn
+
+-   특정 타입을 처리하기 위해 `generator`에 타입 단정문을 수행하는 단계를 배치하고, 벤치마크한다.
+
+#### repeat
+
+```golang
+package main
+
+func main() {
+	repeat := func(
+		done <-chan interface{},
+		values ...interface{},
+	) <-chan interface{} {
+		valueStream := make(chan interface{})
+
+		go func() {
+			defer close(valueStream)
+			for {
+				for _, v := range values {
+					select {
+					case <-done:
+						return
+					case valueStream <- v:
+					}
+				}
+			}
+		}()
+		return valueStream
+	}
+}
+```
+
+-   위 예제는 사용자가 멈추라고 말할 때까지 사용자가 전달한 값을 무한 반복한다
+
+#### take
+
+```golang
+package main
+
+func main() {
+	take := func(
+		done <-chan interface{},
+		valueStream <-chan interface{},
+		num int,
+	) <-chan interface{} {
+		takeStream := make(chan interface{})
+		go func() {
+			defer close(takeStream)
+
+			for i := 0; i < num; i++ {
+				select {
+				case <-done:
+					return
+				case takeStream <- <-valueStream:
+				}
+			}
+		}()
+		return takeStream
+	}
+}
+```
+
+-   `take` 단계는 입력 `valueStream`에서 첫 번째 항목을 취한 다음 종료
+
+#### repeat과 take의 조합
+
+```golang
+package main
+
+import "fmt"
+
+func main() {
+	repeat := func(
+		done <-chan interface{},
+		values ...interface{},
+	) <-chan interface{} {
+		valueStream := make(chan interface{})
+
+		go func() {
+			defer close(valueStream)
+			for {
+				for _, v := range values {
+					select {
+					case <-done:
+						return
+					case valueStream <- v:
+					}
+				}
+			}
+		}()
+		return valueStream
+	}
+
+	take := func(
+		done <-chan interface{},
+		valueStream <-chan interface{},
+		num int,
+	) <-chan interface{} {
+		takeStream := make(chan interface{})
+		go func() {
+			defer close(takeStream)
+
+			for i := 0; i < num; i++ {
+				select {
+				case <-done:
+					return
+				case takeStream <- <-valueStream:
+				}
+			}
+		}()
+		return takeStream
+	}
+
+	done := make(chan interface{})
+	defer close(done)
+
+	for num := range take(done, repeat(done, 1), 10) {
+		fmt.Printf("%v ", num)
+	}
+}
+```
+
+-   `repeat`은 1을 무한히 반복해서 생성하는 `generator`
+-   `take`는 `repeat`에서 10개만을 가져오는 `generator`
+
+#### repeatFn
+
+-   위의 예제를 확장해서 반복적으로 함수를 호출하는 `generator`를 만들 수 있음
+
+```golang
+package main
+
+import (
+	"fmt"
+	"math/rand"
+)
+
+func main() {
+	repeatFn := func(
+		done <-chan interface{},
+		fn func() interface{},
+	) <-chan interface{} {
+		valueStream := make(chan interface{})
+
+		go func() {
+			defer close(valueStream)
+			for {
+				select {
+				case <-done:
+					return
+				case valueStream <- fn():
+				}
+			}
+		}()
+		return valueStream
+	}
+
+	take := func(
+		done <-chan interface{},
+		valueStream <-chan interface{},
+		num int,
+	) <-chan interface{} {
+		takeStream := make(chan interface{})
+		go func() {
+			defer close(takeStream)
+
+			for i := 0; i < num; i++ {
+				select {
+				case <-done:
+					return
+				case takeStream <- <-valueStream:
+				}
+			}
+		}()
+		return takeStream
+	}
+
+	done := make(chan interface{})
+	defer close(done)
+
+	rand := func() interface{} { return rand.Int() }
+
+	for num := range take(done, repeatFn(done, rand), 10) {
+		fmt.Println(num)
+	}
+}
+
+```
+
+-   `repeat`과 `repeatFn` 생성기는 목록 또는 연산자를 반복해 데이터 스트림을 생성하는 것이 주된 관심사
+-   `take`단계는 파이프라인을 제한하는 것이 주된 관심사
+-   위 연산들(`repeat`, `repeatFn`, `take`)은 작업 중인 타입에 대한 정보가 필요 없음
+
+#### 특정 타입을 처리하는 단계
+
+-   특정 타입을 처리해야하는 경우, 타입 단정문(assertion)을 수행하는 단계를 배치할 수 있음
+
+```golang
+package main
+
+import "fmt"
+
+func main() {
+
+	toString := func(
+		done <-chan interface{},
+		valueStream <-chan interface{},
+	) <-chan string {
+		stringStream := make(chan string)
+
+		go func() {
+			defer close(stringStream)
+			for v := range valueStream {
+				select {
+				case <-done:
+					return
+				case stringStream <- v.(string):
+				}
+			}
+		}()
+		return stringStream
+	}
+
+	repeat := func(
+		done <-chan interface{},
+		values ...interface{},
+	) <-chan interface{} {
+		valueStream := make(chan interface{})
+
+		go func() {
+			defer close(valueStream)
+			for {
+				for _, v := range values {
+					select {
+					case <-done:
+						return
+					case valueStream <- v:
+					}
+				}
+			}
+		}()
+		return valueStream
+	}
+
+	take := func(
+		done <-chan interface{},
+		valueStream <-chan interface{},
+		num int,
+	) <-chan interface{} {
+		takeStream := make(chan interface{})
+		go func() {
+			defer close(takeStream)
+
+			for i := 0; i < num; i++ {
+				select {
+				case <-done:
+					return
+				case takeStream <- <-valueStream:
+				}
+			}
+		}()
+		return takeStream
+	}
+
+	done := make(chan interface{})
+	defer close(done)
+
+	var message string
+	for token := range toString(done, take(done, repeat(done, "I", "am."), 5)) {
+		message += token
+	}
+
+	fmt.Printf("message: %s...", message)
+}
+```
+
+**Benchmark**
+
+-   파이프라인을 일반화하는 부분의 성능상 비용은 무시할 수 있음을 증명
+-   성능상 비용을 무시할 수 있음을 증명하기 위해서 일반적인 단계를 테스트하는 함수와 타입에 특화된 단계를 테스트하는 함수를 작성
+
+```golang
+package pipelines
+
+import "testing"
+
+func BenchmarkGeneric(b *testing.B) {
+
+	toString := func(
+		done <-chan interface{},
+		valueStream <-chan interface{},
+	) <-chan string {
+		stringStream := make(chan string)
+
+		go func() {
+			defer close(stringStream)
+			for v := range valueStream {
+				select {
+				case <-done:
+					return
+				case stringStream <- v.(string):
+				}
+			}
+		}()
+		return stringStream
+	}
+
+	repeat := func(
+		done <-chan interface{},
+		values ...interface{},
+	) <-chan interface{} {
+		valueStream := make(chan interface{})
+
+		go func() {
+			defer close(valueStream)
+			for {
+				for _, v := range values {
+					select {
+					case <-done:
+						return
+					case valueStream <- v:
+					}
+				}
+			}
+		}()
+		return valueStream
+	}
+
+	take := func(
+		done <-chan interface{},
+		valueStream <-chan interface{},
+		num int,
+	) <-chan interface{} {
+		takeStream := make(chan interface{})
+		go func() {
+			defer close(takeStream)
+
+			for i := 0; i < num; i++ {
+				select {
+				case <-done:
+					return
+				case takeStream <- <-valueStream:
+				}
+			}
+		}()
+		return takeStream
+	}
+
+	done := make(chan interface{})
+	defer close(done)
+
+	b.ResetTimer()
+	for range toString(done, take(done, repeat(done, "a"), b.N)) {
+
+	}
+}
+
+func BenchmarkTyped(b *testing.B) {
+	repeat := func(done <-chan interface{}, values ...string) <-chan string {
+		valueStream := make(chan string)
+
+		go func() {
+			defer close(valueStream)
+			for {
+				for _, v := range values {
+					select {
+					case <-done:
+						return
+					case valueStream <- v:
+					}
+				}
+			}
+		}()
+		return valueStream
+	}
+
+	take := func(
+		done <-chan interface{},
+		valueStream <-chan string,
+		num int,
+	) <-chan string {
+		takeStream := make(chan string)
+		go func() {
+			defer close(takeStream)
+			for i := num; i > 0 || i == -1; {
+				if i != -1 {
+					i--
+				}
+
+				select {
+				case <-done:
+					return
+				case takeStream <- <-valueStream:
+				}
+			}
+		}()
+		return takeStream
+	}
+
+	done := make(chan interface{})
+	defer close(done)
+	b.ResetTimer()
+
+	for range take(done, repeat(done, "a"), b.N) {
+
+	}
+}
+```
+
+```bash
+$ go test -bench=.
+>>>
+goos: darwin
+goarch: amd64
+BenchmarkGeneric-12      1000000              1478 ns/op
+BenchmarkTyped-12        2000000               859 ns/op
+PASS
+ok      _/Users/martin/Documents/dev/Study/concurrency-go/ch4/09-pipeline-test  4.098s
+```
+
+-   특정 타입에 특화된 단계가 2배 정도 빠르지만, 크게 의미있는 정도는 아님
+    -   일반적으로 파이프라인의 성능상 제한 요소는 `generator` 또는 계산 집약적인 단계 중 하나
+    -   디스크나 네트워크에 읽어오는 경우 여기서 보이는 성능상의 부하는 큰 의미가 없음
+
+## 팬 아웃, 팬 인
+
+-   작업 단계 중 하나에 계산량이 많이 필요하다면, 이것 역시 성능상 부하를 퇴색시킬 것
+-   계산적으로 비용이 많이 드는 단계를 어떻게 줄일 수 있을까?
+-   이를 완화하는 방법이 `팬 아웃`, `팬 인`
